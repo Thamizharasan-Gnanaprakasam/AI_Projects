@@ -1,0 +1,31 @@
+# Python virtual environment
+.venv/
+venv/
+env/
+ENV/
+
+# PyInstaller & Build artifacts
+dist/
+build/
+*.spec.bak
+
+# Bytecode & Caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local environment & secrets
+.env
+
+# Local database & recordings
+data/*.db
+*.wav
+*.aiff
+
+# macOS & System files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+.vscode/
+.idea/
