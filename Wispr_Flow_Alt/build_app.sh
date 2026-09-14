@@ -28,7 +28,10 @@ $PYTHON -m PyInstaller --version >/dev/null 2>&1 || {
 }
 
 echo "Running PyInstaller with VoiceInk.spec..."
+xattr -cr . || true
 $PYTHON -m PyInstaller --clean -y VoiceInk.spec
+xattr -cr dist/VoiceInk.app || true
+codesign --force --deep --sign - dist/VoiceInk.app || true
 
 echo "=== Build Complete ==="
 echo "Application bundle available at: dist/VoiceInk.app"

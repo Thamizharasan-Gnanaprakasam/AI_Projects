@@ -51,23 +51,37 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pyinstaller
 
+      - name: Ensure fallback .env exists
+        shell: bash
+        run: |
+          if [ ! -f .env ]; then
+            if [ -f .env.example ]; then
+              cp .env.example .env
+            else
+              touch .env
+            fi
+          fi
+
       - name: Build macOS App (.app)
         if: runner.os == 'macOS'
         run: |
-          pyinstaller --clean -y VoiceInk.spec
+          xattr -cr . || true
+          python -m PyInstaller --clean -y VoiceInk.spec
+          xattr -cr dist/VoiceInk.app || true
+          codesign --force --deep --sign - dist/VoiceInk.app || true
           cd dist
           ditto -c -k --sequesterRsrc --keepParent VoiceInk.app VoiceInk-macOS.zip
 
       - name: Build Windows App (.exe)
         if: runner.os == 'Windows'
         run: |
-          pyinstaller --clean -y VoiceInk_win.spec
-          Compress-Archive -Path dist\VoiceInk\* -DestinationPath dist\VoiceInk-Windows.zip
+          python -m PyInstaller --clean -y VoiceInk_win.spec
+          python -c "import shutil; shutil.make_archive('dist/VoiceInk-Windows', 'zip', 'dist/VoiceInk')"
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
           path: |
-            Wispr_Flow_Alt/dist/*.zip
+            Wispr_Flow_Alt/dist/VoiceInk-*.zip
           retention-days: 14

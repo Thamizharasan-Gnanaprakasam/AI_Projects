@@ -3,15 +3,22 @@
 
 block_cipher = None
 
+import os
+
+extra_datas = [
+    ('assets', 'assets'),
+    ('tones', 'tones'),
+]
+if os.path.exists('.env'):
+    extra_datas.append(('.env', '.'))
+elif os.path.exists('.env.example'):
+    extra_datas.append(('.env.example', '.'))
+
 a = Analysis(
     ['run_gui.py'],
     pathex=['.'],
     binaries=[],
-    datas=[
-        ('assets', 'assets'),
-        ('tones', 'tones'),
-        ('.env', '.'),
-    ],
+    datas=extra_datas,
     hiddenimports=[
         'PyQt6',
         'PyQt6.QtCore',
@@ -30,6 +37,9 @@ a = Analysis(
         'sqlite3',
         'httpx',
         'certifi',
+        'requests',
+        'noisereduce',
+        'PIL',
     ],
     hookspath=[],
     hooksconfig={},
@@ -37,6 +47,9 @@ a = Analysis(
     excludes=[
         'tkinter',
         'matplotlib',
+        'torch',
+        'torchvision',
+        'torchaudio',
         'Cocoa',
         'AppKit',
         'Quartz',
@@ -63,7 +76,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -79,7 +92,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='VoiceInk',
 )

@@ -2,15 +2,22 @@
 
 block_cipher = None
 
+import os
+
+extra_datas = [
+    ('assets', 'assets'),
+    ('tones', 'tones'),
+]
+if os.path.exists('.env'):
+    extra_datas.append(('.env', '.'))
+elif os.path.exists('.env.example'):
+    extra_datas.append(('.env.example', '.'))
+
 a = Analysis(
     ['run_gui.py'],
     pathex=['.'],
     binaries=[],
-    datas=[
-        ('assets', 'assets'),
-        ('tones', 'tones'),
-        ('.env', '.'),
-    ],
+    datas=extra_datas,
     hiddenimports=[
         'PyQt6',
         'PyQt6.QtCore',
@@ -33,11 +40,20 @@ a = Analysis(
         'sqlite3',
         'httpx',
         'certifi',
+        'requests',
+        'noisereduce',
+        'PIL',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib'],
+    excludes=[
+        'tkinter',
+        'matplotlib',
+        'torch',
+        'torchvision',
+        'torchaudio',
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
