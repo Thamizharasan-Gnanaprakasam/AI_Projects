@@ -119,14 +119,69 @@ def inject_text_at_cursor(text: str, restore_clipboard: bool = True) -> bool:
     # ----------------- Windows Implementation -----------------
     elif IS_WINDOWS:
         try:
-            from PyQt6.QtWidgets import QApplication
+            import ctypes
+            from ctypes import wintypes
             from pynput.keyboard import Controller, Key
 
-            clipboard = QApplication.clipboard()
-            old_text = clipboard.text() if restore_clipboard else None
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            CF_UNICODETEXT = 13
+            GMEM_MOVEABLE = 0x0002
+
+            def win32_get_clipboard() -> Optional[str]:
+                for _ in range(5):
+                    if user32.OpenClipboard(None):
+                        break
+                    time.sleep(0.01)
+                else:
+                    return None
+                try:
+                    h_mem = user32.GetClipboardData(CF_UNICODETEXT)
+                    if not h_mem:
+                        return None
+                    kernel32.GlobalLock.restype = ctypes.c_wchar_p
+                    ptr = kernel32.GlobalLock(h_mem)
+                    val = str(ptr) if ptr else None
+                    kernel32.GlobalUnlock(h_mem)
+                    return val
+                finally:
+                    user32.CloseClipboard()
+
+            def win32_set_clipboard(content: str) -> bool:
+                data = content.encode('utf-16le') + b'\x00\x00'
+                h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+                if not h_mem:
+                    return False
+                kernel32.GlobalLock.restype = ctypes.c_void_p
+                ptr = kernel32.GlobalLock(h_mem)
+                if not ptr:
+                    kernel32.GlobalFree(h_mem)
+                    return False
+                ctypes.memmove(ptr, data, len(data))
+                kernel32.GlobalUnlock(h_mem)
+
+                for _ in range(5):
+                    if user32.OpenClipboard(None):
+                        break
+                    time.sleep(0.01)
+                else:
+                    kernel32.GlobalFree(h_mem)
+                    return False
+
+                try:
+                    user32.EmptyClipboard()
+                    user32.SetClipboardData(CF_UNICODETEXT, h_mem)
+                    return True
+                finally:
+                    user32.CloseClipboard()
+
+            old_text = win32_get_clipboard() if restore_clipboard else None
             
-            # Put target text on clipboard
-            clipboard.setText(text)
+            # Put target text on clipboard thread-safely
+            if not win32_set_clipboard(text):
+                logger.warning("Failed setting clipboard via Win32 API.")
+                return False
+
             time.sleep(0.04)
 
             # Simulate Ctrl + V
@@ -140,9 +195,9 @@ def inject_text_at_cursor(text: str, restore_clipboard: bool = True) -> bool:
             # Restore original clipboard
             if restore_clipboard and old_text is not None:
                 def _restore():
-                    time.sleep(0.15)
+                    time.sleep(0.20)
                     try:
-                        clipboard.setText(old_text)
+                        win32_set_clipboard(old_text)
                     except Exception:
                         pass
                 threading.Thread(target=_restore, daemon=True).start()

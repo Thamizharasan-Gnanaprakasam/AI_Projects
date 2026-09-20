@@ -144,6 +144,57 @@ class TestWisprFlowAlt(unittest.TestCase):
         self.assertFalse(tp._is_chatbot_response("Please send the financial summary by tomorrow."))
         self.assertFalse(tp._is_chatbot_response("வணக்கம், எப்படி இருக்கீங்க?"))
 
+    def test_audio_stereo_downmix(self):
+        """Tests that multi-channel (stereo) chunks are converted to mono."""
+        recorder = AudioRecorder(sample_rate=16000, channels=1)
+        recorder.is_recording = True
+        
+        # Simulate a 2-channel stereo audio frame (shape: 100 frames, 2 channels)
+        left = np.ones((100, 1), dtype=np.float32) * 0.4
+        right = np.ones((100, 1), dtype=np.float32) * 0.2
+        stereo_chunk = np.hstack([left, right])
+        
+        recorder._audio_callback(stereo_chunk, 100, None, None)
+        self.assertFalse(recorder.audio_queue.empty())
+        mono_chunk = recorder.audio_queue.get()
+        
+        self.assertEqual(mono_chunk.ndim, 1)
+        self.assertEqual(len(mono_chunk), 100)
+        # Average of 0.4 and 0.2 is 0.3
+        self.assertAlmostEqual(float(mono_chunk[0]), 0.3, places=5)
+        recorder.is_recording = False
+
+    def test_audio_resampling_48k_to_16k(self):
+        """Tests that audio recorded at 48kHz is properly resampled to 16kHz on stop_recording."""
+        recorder = AudioRecorder(sample_rate=16000, channels=1)
+        recorder.is_recording = True
+        recorder._actual_sample_rate = 48000  # Simulate 48kHz hardware
+        
+        # Simulate 1 second of 440Hz sine wave at 48kHz
+        t = np.linspace(0, 1.0, 48000, endpoint=False, dtype=np.float32)
+        sine_48k = 0.5 * np.sin(2 * np.pi * 440 * t).astype(np.float32)
+        
+        # Put into audio queue in blocks of 2400 (50ms at 48kHz)
+        for i in range(0, 48000, 2400):
+            recorder.audio_queue.put(sine_48k[i:i+2400])
+        
+        audio_data, duration = recorder.stop_recording()
+        
+        self.assertIsNotNone(audio_data)
+        self.assertEqual(audio_data.ndim, 1)
+        # 1 second of audio at target 16kHz should have length approximately 16000
+        # (after silence trimming / preprocessing)
+        self.assertAlmostEqual(duration, 1.0, delta=0.2)
+        self.assertTrue(len(audio_data) > 8000)
+
+    def test_audio_recorder_input_parameter_negotiation(self):
+        """Tests that _find_best_input_parameters selects a valid device and parameters."""
+        recorder = AudioRecorder(sample_rate=16000, channels=1)
+        dev_idx, rate, ch = recorder._find_best_input_parameters()
+        self.assertIsNotNone(dev_idx)
+        self.assertIn(rate, [16000, 44100, 48000, 96000])
+        self.assertIn(ch, [1, 2])
+
 if __name__ == "__main__":
     unittest.main()
 

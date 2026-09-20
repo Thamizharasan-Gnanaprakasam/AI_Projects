@@ -4,14 +4,18 @@ Audio recording module with microphone capture and Voice Activity Detection (VAD
 
 import time
 import queue
+import logging
 import tempfile
 import threading
+from math import gcd
 from pathlib import Path
 from typing import Optional, Tuple
 import numpy as np
 import sounddevice as sd
 import scipy.signal
 from scipy.io import wavfile
+
+logger = logging.getLogger(__name__)
 
 try:
     import noisereduce as nr
@@ -50,17 +54,102 @@ class AudioRecorder:
         self._stream: Optional[sd.InputStream] = None
         self._recorded_chunks = []
         self._record_start_time = 0.0
+        self._actual_sample_rate = sample_rate
+        self._actual_channels = channels
+
+    def _find_best_input_parameters(self) -> Tuple[Optional[int], int, int]:
+        """
+        Dynamically negotiates a compatible input device, sample rate, and channel count.
+        Essential on Windows (WASAPI) where devices reject 16kHz or 1-channel capture.
+        Returns: (device_index, actual_sample_rate, actual_channels)
+        """
+        try:
+            default_dev_idx = sd.default.device[0]
+        except Exception:
+            default_dev_idx = None
+
+        candidate_devices = []
+        if default_dev_idx is not None and default_dev_idx >= 0:
+            candidate_devices.append(default_dev_idx)
+
+        try:
+            devices = sd.query_devices()
+            for idx, dev in enumerate(devices):
+                if idx not in candidate_devices and dev.get("max_input_channels", 0) > 0:
+                    candidate_devices.append(idx)
+        except Exception as e:
+            logger.warning(f"Failed querying audio devices: {e}")
+
+        if not candidate_devices:
+            raise RuntimeError("No audio input devices found. Please connect a microphone and ensure access is enabled.")
+
+        for dev_idx in candidate_devices:
+            try:
+                dev_info = sd.query_devices(dev_idx, "input")
+            except Exception:
+                continue
+
+            native_rate = int(dev_info.get("default_samplerate", 48000))
+            max_in_channels = int(dev_info.get("max_input_channels", 1))
+            native_channels = max(1, min(2, max_in_channels))
+
+            # Strategy / order of preference:
+            # 1. Target settings (16kHz mono) - ideal, zero resampling needed
+            # 2. Target rate, native channels (16kHz stereo)
+            # 3. Native rate, mono (e.g. 48kHz mono)
+            # 4. Native rate, native channels (e.g. 48kHz stereo) - standard Windows WASAPI
+            # 5. Standard fallback rates: 48000, 44100
+            param_trials = [
+                (self.sample_rate, self.channels),
+                (self.sample_rate, native_channels),
+                (native_rate, 1),
+                (native_rate, native_channels),
+                (48000, native_channels),
+                (48000, 1),
+                (44100, native_channels),
+                (44100, 1),
+            ]
+
+            seen = set()
+            unique_trials = []
+            for rate, ch in param_trials:
+                if (rate, ch) not in seen and ch <= max_in_channels:
+                    seen.add((rate, ch))
+                    unique_trials.append((rate, ch))
+
+            for rate, ch in unique_trials:
+                try:
+                    sd.check_input_settings(device=dev_idx, samplerate=rate, channels=ch, dtype="float32")
+                    logger.info(f"Selected input device {dev_idx} ('{dev_info.get('name', 'Mic')}') with {rate}Hz, {ch}ch.")
+                    return dev_idx, rate, ch
+                except Exception:
+                    continue
+
+        # If check_input_settings failed for all combinations, fallback to default device native format
+        dev_idx = candidate_devices[0]
+        try:
+            dev_info = sd.query_devices(dev_idx, "input")
+            return dev_idx, int(dev_info.get("default_samplerate", 48000)), max(1, min(2, int(dev_info.get("max_input_channels", 1))))
+        except Exception:
+            return dev_idx, 48000, 1
 
     def _audio_callback(self, indata, frames, time_info, status):
-        """Callback from sounddevice stream."""
+        """Callback from sounddevice stream. Real-time downmixes to mono float32."""
         if status:
-            pass  # Overflow/underflow can be logged if needed
+            logger.debug(f"Audio stream status notice: {status}")
         if self.is_recording:
-            # indata is numpy float32 array (-1.0 to 1.0)
-            self.audio_queue.put(indata.copy())
+            try:
+                # indata shape is (frames, channels)
+                if indata.ndim > 1 and indata.shape[1] > 1:
+                    mono = np.mean(indata, axis=1, dtype=np.float32)
+                else:
+                    mono = indata.flatten().astype(np.float32)
+                self.audio_queue.put(mono)
+            except Exception as e:
+                logger.error(f"Error in audio callback: {e}")
 
     def start_recording(self):
-        """Starts audio recording on a background thread."""
+        """Starts audio recording on a background thread with hardware negotiation."""
         if self.is_recording:
             return
 
@@ -71,23 +160,40 @@ class AudioRecorder:
             except queue.Empty:
                 break
 
-        self.is_recording = True
-        self._stop_event.clear()
-        self._record_start_time = time.time()
+        # Negotiate compatible hardware parameters
+        device_idx, actual_rate, actual_channels = self._find_best_input_parameters()
+        self._actual_sample_rate = actual_rate
+        self._actual_channels = actual_channels
 
-        self._stream = sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            dtype="float32",
-            callback=self._audio_callback,
-            blocksize=int(self.sample_rate * 0.05), # 50ms blocks
-        )
-        self._stream.start()
+        try:
+            self._stream = sd.InputStream(
+                device=device_idx,
+                samplerate=actual_rate,
+                channels=actual_channels,
+                dtype="float32",
+                callback=self._audio_callback,
+                blocksize=0,
+            )
+            self._stream.start()
+            self.is_recording = True
+            self._stop_event.clear()
+            self._record_start_time = time.time()
+            logger.info(f"Audio stream started: device={device_idx}, rate={actual_rate}Hz, channels={actual_channels}")
+        except Exception as e:
+            self.is_recording = False
+            if self._stream is not None:
+                try:
+                    self._stream.close()
+                except Exception:
+                    pass
+                self._stream = None
+            logger.error(f"Failed to start audio recording stream: {e}", exc_info=True)
+            raise
 
     def stop_recording(self) -> Tuple[Optional[np.ndarray], float]:
         """
-        Stops recording and returns the concatenated audio numpy array (float32, 16kHz)
-        along with the duration in seconds.
+        Stops recording, resamples audio to self.sample_rate (16kHz) if needed,
+        and returns the concatenated mono audio numpy array along with duration in seconds.
         """
         if not self.is_recording:
             return None, 0.0
@@ -96,9 +202,13 @@ class AudioRecorder:
         self._stop_event.set()
 
         if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception as e:
+                logger.warning(f"Error closing audio stream: {e}")
+            finally:
+                self._stream = None
 
         # Drain remaining items from the queue
         while not self.audio_queue.empty():
@@ -112,7 +222,19 @@ class AudioRecorder:
             return None, 0.0
 
         audio_data = np.concatenate(self._recorded_chunks, axis=0).flatten()
-        
+
+        # Resample to target sample rate (16kHz) if captured at another rate (e.g. 48kHz, 44.1kHz)
+        if self._actual_sample_rate and self._actual_sample_rate != self.sample_rate:
+            try:
+                g = gcd(int(self.sample_rate), int(self._actual_sample_rate))
+                up = int(self.sample_rate // g)
+                down = int(self._actual_sample_rate // g)
+                audio_data = scipy.signal.resample_poly(audio_data, up, down).astype(np.float32)
+            except Exception as e:
+                logger.warning(f"resample_poly failed, falling back to resample: {e}")
+                target_len = int(len(audio_data) * self.sample_rate / self._actual_sample_rate)
+                audio_data = scipy.signal.resample(audio_data, target_len).astype(np.float32)
+
         # Preprocess: noise cancellation, volume normalization, and silence trimming
         audio_data = self.preprocess_audio(
             audio_data,

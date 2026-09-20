@@ -660,7 +660,22 @@ class MainWindow(QMainWindow):
         self._recording_start_time = time.time()
         play_system_sound("Tink")
 
-        self.audio_recorder.start_recording()
+        try:
+            self.audio_recorder.start_recording()
+        except Exception as e:
+            logger.error(f"Failed to start audio recording: {e}", exc_info=True)
+            err_msg = str(e)
+            if "Invalid sample rate" in err_msg or "Invalid number of channels" in err_msg or "-9997" in err_msg or "-9998" in err_msg:
+                user_msg = "Microphone format unsupported. Check Windows Sound Control Panel."
+            elif "-9996" in err_msg or "No audio input devices" in err_msg or "No default input device" in err_msg:
+                user_msg = "No microphone found. Please connect an audio input device."
+            elif "-9999" in err_msg or "Unanticipated host error" in err_msg or "access" in err_msg.lower():
+                user_msg = "Microphone access denied. Check Windows Privacy > Microphone."
+            else:
+                user_msg = f"Microphone error: {e}"
+            self.signals.processing_error.emit(user_msg)
+            return
+
         self.signals.recording_started.emit()
         self.level_timer.start()
 
@@ -671,11 +686,17 @@ class MainWindow(QMainWindow):
         self.level_bar.setValue(0)
         play_system_sound("Pop")
 
-        audio_data, duration = self.audio_recorder.stop_recording()
+        try:
+            audio_data, duration = self.audio_recorder.stop_recording()
+        except Exception as e:
+            logger.error(f"Error stopping recording: {e}", exc_info=True)
+            self.signals.processing_error.emit(f"Microphone error: {e}")
+            return
+
         self.signals.recording_stopped.emit()
 
         if audio_data is not None and len(audio_data) > 0:
-            threading.Thread(target=self.process_audio_worker, args=(audio_data, duration)).start()
+            threading.Thread(target=self.process_audio_worker, args=(audio_data, duration), daemon=True).start()
 
     def check_audio_level(self):
         """Monitors microphone level for waveform animation and progress bar."""
@@ -859,8 +880,12 @@ class MainWindow(QMainWindow):
         self.load_history()
 
     def on_processing_error(self, err_msg: str):
+        self.level_timer.stop()
+        self.level_bar.setValue(0)
+        self.record_btn.setStyleSheet("")
         self.status_badge.setText("⚠️ Error")
-        self.record_instruction.setText(f"Error: {err_msg}")
+        self.status_badge.setStyleSheet("background-color: rgba(239, 68, 68, 0.2); color: #F87171; padding: 4px 12px; border-radius: 6px; font-weight: 600;")
+        self.record_instruction.setText(f"{err_msg}")
         self.floating_pill.set_recording_state(False)
 
     def on_language_changed(self):
